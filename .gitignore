@@ -15,12 +15,12 @@ venv/
 env/
 
 # Data — raw data never committed (too large / sensitive)
-data/raw/
-data/processed/
-*.csv
+#data/raw/
+#data/processed/
+#*.csv
 *.parquet
-*.xlsx
-!data/.gitkeep
+#*.xlsx
+#!data/.gitkeep
 
 # Models
 models/*.pkl
