@@ -71,3 +71,11 @@ coef_df = pd.DataFrame({
 
 print("\nFeature coefficients (sorted by magnitude):")
 print(coef_df.to_string(index=False))
+
+# ── EXPORT MODEL AND SCALER FOR DASHBOARD ──────────────────────────────
+import joblib
+import os
+os.makedirs("models", exist_ok=True)
+joblib.dump(final_model, "models/linear_model.joblib")
+joblib.dump(scaler, "models/scaler.joblib")
+print("\n[✓] Modèle et Scaler sauvegardés dans le dossier 'models/'")
