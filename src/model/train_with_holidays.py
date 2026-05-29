@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore")
 
 # ── Paths ─────────────────────────────────────────────────────────
 ROOT      = Path(__file__).resolve().parent
-DATA_PATH = ROOT.parents[1] / "data" / "sample" / "spiges_meteo_traffic_joined.csv"
+DATA_PATH = ROOT.parents[1] / "data" / "historical" / "spiges_meteo_traffic_joined.csv"
 MODEL_DIR = ROOT.parents[1] / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
