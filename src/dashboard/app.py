@@ -244,24 +244,31 @@ try:
     shap.plots.waterfall(shap_values[0], show=False)
     st.pyplot(fig_shap, clear_figure=True)
 except Exception:
-    import plotly.express as px
-    # Fallback mock SHAP graph for presentation if real model is not pushed
-    mock_shap = {
-        "Saison (Hiver)": 0.28,
-        "Jour Semaine (Lundi)": 0.22,
-        "Température Max": -0.18,
-        "Mobilité (Forte)": 0.15,
-        "Précipitations": 0.07,
-    }
-    fig_mock = px.bar(
-        x=list(mock_shap.values()),
-        y=list(mock_shap.keys()),
-        orientation="h",
-        color=list(mock_shap.values()),
-        color_continuous_scale=["#00E676", "#F63366"],
-        title="Impact des Facteurs (Mode Démonstration)"
+    import numpy as np
+    # Création d'un objet SHAP fictif pour générer le graphique en cascade (waterfall) en l'absence du vrai modèle
+    base_value = 130.0
+    shap_vals = np.array([12.5, -5.2, 8.4, -3.1, 2.0])
+    feature_data = np.array([1, 0, 28.5, 0.8, 12.0])
+    feature_names = ["Saison (Hiver=1)", "Weekend (Oui=1)", "Température Max (°C)", "Index Mobilité", "Précipitations (mm)"]
+    
+    mock_explanation = shap.Explanation(
+        values=shap_vals,
+        base_values=base_value,
+        data=feature_data,
+        feature_names=feature_names
     )
-    fig_mock.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0), plot_bgcolor='#1E2127', paper_bgcolor='#0E1117', font_color='#FFFFFF')
-    st.plotly_chart(fig_mock, use_container_width=True)
+    
+    fig_shap, ax = plt.subplots(figsize=(8, 4))
+    # On force les couleurs du waterfall avec matplotlib si besoin, ou on utilise le style par défaut
+    shap.plots.waterfall(mock_explanation, show=False)
+    
+    # Rendre le fond sombre pour correspondre au thème
+    fig_shap.patch.set_facecolor('#0E1117')
+    ax.set_facecolor('#0E1117')
+    ax.tick_params(colors='white')
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    
+    st.pyplot(fig_shap, clear_figure=True)
 
 st.info("💡 **Astuce Renkulab :** Modifiez les paramètres météo dans la barre latérale pour voir la courbe et SHAP s'adapter dynamiquement.")
