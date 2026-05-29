@@ -15,29 +15,49 @@ from sklearn.impute import SimpleImputer
 
 # Models
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import GridSearchCV
-
+from sklearn.ensemble import GradientBoostingRegressor
 
 # Metrics
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from sklearn.model_selection import TimeSeriesSplit  # for future
 
+import shap
+
 import holidays
 
-from model_preparation import (
-    train_features, train_target,
-    val_features,   val_target,
-    test_features,  test_target,
-)
+csv_path = "data/london_daily_temperature_aggregated_lag_traffic.csv"
+out_path = "results/london_rf_traffic/"
+os.makedirs(out_path, exist_ok=True)
 
-X_train = train_features
-y_train = train_target
+FEATURE_COLS = [
+    "temperature_min_c", "lag1", "weekday_num", "is_holidays", "traffic_tfl_tube_index"
+]
 
-X_val = val_features
-y_val = val_target
+TARGET_COL = "calls_assessed_by_clinician"
 
-out_path = "results/random_forest/"
+df = pd.read_csv(csv_path, parse_dates=["date"])
+df["is_holidays"] = df.apply(lambda row: holidays.UK(subdiv="ENG", years=row["date"].year).get(row["date"]) is not None, axis=1)
+df["weekday"] = df["date"].dt.day_name()
+df["weekday_num"] = df["date"].dt.weekday
+
+df = df.sort_values("date").reset_index(drop=True)
+df = df.dropna(subset=[TARGET_COL] + FEATURE_COLS)
+
+#df["date"] = pd.to_datetime(df["date"])
+
+
+n = len(df)
+train_end = int(n * 0.80)
+
+train = df.iloc[:train_end]
+val   = df.iloc[train_end:]
+
+X_train = train[FEATURE_COLS].reset_index(drop=True)
+y_train   = train[TARGET_COL].reset_index(drop=True)
+
+X_val   = val[FEATURE_COLS].reset_index(drop=True)
+y_val     = val[TARGET_COL].reset_index(drop=True)
 
 
 # ── Preprocessing pipeline ─────────────────────────────────────────────────
@@ -73,7 +93,7 @@ results = {}  # in case we want to run other models, or do cv, etc.
 
 rf = Pipeline([
     ('pre', preprocessor),
-    ('reg', RandomForestRegressor(n_estimators=100, random_state=10))
+    ('reg', RandomForestRegressor(n_estimators=200, random_state=10))
 ])
 
 rf.fit(X_train, y_train)
@@ -81,14 +101,13 @@ y_pred_rf = rf.predict(X_val)
 results["rf"] = {
         'mse': mean_squared_error(y_val, y_pred_rf),
         'mae': mean_absolute_error(y_val, y_pred_rf),
-        'rmse': root_mean_squared_error(y_val, y_pred_rf),
         'r2': r2_score(y_val, y_pred_rf)
     }
 pd.DataFrame([results["rf"]]).to_csv(os.path.join(out_path, "metrics.csv"), index=False)
 
 print(results["rf"])
 df = pd.DataFrame({"actual": y_val, "predicted": y_pred_rf})
-df.to_csv(os.path.join("results.csv"), index=False)
+df.to_csv(os.path.join(out_path, "results.csv"), index=False)
 
 fig, ax = plt.subplots()
 
@@ -104,6 +123,7 @@ ax.set_title("Predicted vs Actual")
 ax.legend()
 plt.tight_layout()
 plt.savefig(os.path.join(out_path, "actual_v_predicted.png"))
+plt.close()
 
 # residual plot
 residuals = y_val - y_pred_rf
@@ -115,9 +135,22 @@ ax.set_ylabel("Residual (actual - predicted)")
 ax.set_title("Residual Plot")
 plt.tight_layout()
 plt.savefig(os.path.join(out_path, "residuals.png"))
+plt.close()
 
-# ── EXPORT MODEL FOR DASHBOARD ─────────────────────────────────────────────
-import joblib
-os.makedirs("models", exist_ok=True)
-joblib.dump(rf, "models/forest_model.joblib")
-print("\n[✓] Modèle Random Forest sauvegardé dans 'models/forest_model.joblib'")
+
+
+# Create SHAP TreeExplainer
+explainer = shap.Explainer(rf)
+
+shap_values = explainer.shap_values(X_val)
+
+# Summary plot
+shap.summary_plot(shap_values, X_val)
+
+# Force plot for a single prediction
+shap.force_plot(
+    explainer.expected_value,
+    shap_values[0],
+    X_val.iloc[0],
+    matplotlib=True
+)
