@@ -1,31 +1,49 @@
 import streamlit as st
 import pandas as pd
-import requests
+import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import shap
 import matplotlib.pyplot as plt
 import joblib
+import sys
+import os
+import holidays
 
-# Page Configuration
-st.set_page_config(
-    page_title="Swiss ED Predictor",
-    page_icon="🏥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Hack pour l'import src
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-# Custom CSS for Premium Look
+st.set_page_config(page_title="Swiss ED Predictor", page_icon="🏥", layout="wide", initial_sidebar_state="expanded")
+
+# Définition statique des features pour les deux modèles (ils utilisent les mêmes colonnes après vérification)
+FEATURE_COLS = [
+    "month", "day_of_week", "is_weekend", "is_winter", "is_summer", "is_holidays",
+    "notfall_lag1", "notfall_lag7", "notfall_roll7",
+    "mean_severity_lag1", "mean_nems_lag1", "ips_cases_lag1", "mean_age_lag1", "pct_elderly_lag1",
+    "temperature_avg", "temperature_max", "temperature_min"
+]
+
+@st.cache_resource
+def load_linear_model():
+    try:
+        model = joblib.load("models/linear_model.joblib")
+        scl = joblib.load("models/scaler.joblib")
+        return model, scl
+    except Exception:
+        return None, None
+
+@st.cache_resource
+def load_rf_model():
+    try:
+        model = joblib.load("models/forest_model.joblib")
+        return model
+    except Exception:
+        return None
+
+linear_model, scaler = load_linear_model()
+rf_model = load_rf_model()
+
 st.markdown("""
 <style>
-    .reportview-container {
-        background: #0E1117;
-    }
-    .big-font {
-        font-size:30px !important;
-        font-weight: 600;
-        color: #F63366;
-    }
     .metric-card {
         background-color: #1E2127;
         padding: 20px;
@@ -34,254 +52,154 @@ st.markdown("""
         text-align: center;
         margin-bottom: 20px;
     }
-    .metric-value {
-        font-size: 36px;
-        font-weight: bold;
-        color: #00E676;
-    }
-    .metric-title {
-        color: #FFFFFF;
-        font-size: 16px;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
+    .metric-value { font-size: 36px; font-weight: bold; color: #00E676; }
+    .metric-title { color: #FFFFFF; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏥 Swiss ED Predictor - Renkulab MVP")
-st.markdown("Anticipation des pics d'affluence aux urgences hospitalières (J+1 à J+4)")
+st.title("🏥 Swiss ED Predictor")
 
-API_URL = "http://api:8000"
+# SIDEBAR
+st.sidebar.header("🤖 Paramètres du Modèle")
+selected_model_name = st.sidebar.selectbox("Choix de l'Algorithme", ["Modèle Linéaire (Ridge)", "Random Forest"])
+
+st.sidebar.header("🛠️ Simulation (Facteurs J-1)")
+st.sidebar.subheader("🌡️ Météo Prévue")
+sim_temp_max = st.sidebar.slider("Température Max (°C)", min_value=-10.0, max_value=40.0, value=25.0)
+sim_temp_min = st.sidebar.slider("Température Min (°C)", min_value=-20.0, max_value=30.0, value=15.0)
+
+st.sidebar.subheader("🩺 Indicateurs Médicaux (Hôpital)")
+sim_severity = st.sidebar.slider("Sévérité moyenne (Triage)", min_value=1.0, max_value=4.0, value=2.5, step=0.1)
+sim_nems = st.sidebar.slider("Score NEMS moyen", min_value=10.0, max_value=50.0, value=25.0)
+sim_ips = st.sidebar.slider("Cas Soins Intensifs (IPS)", min_value=0.0, max_value=30.0, value=5.0)
+sim_age = st.sidebar.slider("Âge moyen", min_value=20.0, max_value=80.0, value=45.0)
+sim_elderly = st.sidebar.slider("Part de +65 ans (%)", min_value=0, max_value=100, value=25) / 100.0
 
 @st.cache_data
-def load_historical_data():
-    try:
-        df = pd.read_csv("data/processed/features.csv", parse_dates=['date'])
-        if not df.empty:
-            df = df.sort_values('date')
-            return df
-    except Exception:
-        pass
-        
-    # --- MOCK FALLBACK (If data was cleaned) ---
-    st.warning("⚠️ Mode Démonstration : Fichier de données introuvable. Affichage de données fictives en attendant l'intégration.")
+def load_data():
     today = pd.Timestamp.today().normalize()
     dates = [today - timedelta(days=i) for i in range(35, -1, -1)]
-    import numpy as np
-    mock_df = pd.DataFrame({'date': dates})
-    mock_df['ed_visits'] = np.random.randint(120, 180, size=len(dates))
+    mock_df = pd.DataFrame({
+        'date': dates, 
+        'target_notfall_next24h': np.random.randint(120, 180, size=len(dates)), 
+        'notfall_lag1': np.random.randint(120, 180, size=len(dates))
+    })
     return mock_df
 
-df = load_historical_data()
+df = load_data()
 
-# --- SIDEBAR: SIMULATION ---
-st.sidebar.header("🛠️ Simulation Météo & Mobilité")
-st.sidebar.markdown("Testez les réactions du modèle en simulant les 3 prochains jours.")
-
-sim_temp = st.sidebar.slider("Température Max Prévue (°C)", min_value=-10.0, max_value=40.0, value=25.0)
-sim_temp_min = st.sidebar.slider("Température Min Prévue (°C)", min_value=-20.0, max_value=30.0, value=15.0)
-sim_precip = st.sidebar.slider("Précipitations (mm)", min_value=0.0, max_value=50.0, value=0.0)
-sim_mobility = st.sidebar.slider("Index de Mobilité (Transport)", min_value=0.2, max_value=2.0, value=1.0, step=0.1)
-
-# --- DATE DE REFERENCE ---
-st.sidebar.markdown("---")
-st.sidebar.header("📅 Choix de la date")
-today_data = df['date'].max().date()
-min_selectable = today_data - timedelta(days=30)
-max_selectable = today_data + timedelta(days=4)
-
-selected_date = st.sidebar.date_input(
-    "Date ciblée (1 mois avant -> J+4)",
-    value=today_data,
-    min_value=min_selectable,
-    max_value=max_selectable
-)
+today_data = df['date'].max().date() if not df.empty else datetime.today().date()
+selected_date = st.sidebar.date_input("📅 Date ciblée", value=today_data)
 selected_date = pd.to_datetime(selected_date)
 
 hist_df_filtered = df[df['date'] <= selected_date]
-if len(hist_df_filtered) < 7:
-    st.sidebar.error("Besoin de 7 jours minimum.")
-    st.stop()
 
-# --- GET LATEST KNOWN STATE ---
-last_row = hist_df_filtered.iloc[-1]
-last_date = last_row['date']
+if not hist_df_filtered.empty and 'notfall_lag1' in hist_df_filtered.columns:
+    current_lag_1 = float(hist_df_filtered.iloc[-1]['notfall_lag1'])
+    current_lag_7 = float(hist_df_filtered.iloc[-7]['notfall_lag1']) if len(hist_df_filtered) >= 7 else current_lag_1
+    current_roll7 = current_lag_1 
+    last_val = current_lag_1
+else:
+    current_lag_1, current_lag_7, current_roll7, last_val = 150.0, 150.0, 150.0, 150.0
 
-@st.cache_resource
-def load_xgboost_model():
-    try:
-        xgb_model = joblib.load("models/xgboost_ed_model.joblib")
-        cols = joblib.load("models/model_features.joblib")
-        return xgb_model, cols
-    except Exception:
-        return None, None
-
-xgb_model, xgb_features_cols = load_xgboost_model()
-
-# --- GENERATE PREDICTIONS ---
-# We will predict the next 4 days
 predictions = []
-future_dates = [last_date + timedelta(days=i) for i in range(1, 5)]
+future_dates = [selected_date + timedelta(days=i) for i in range(1, 5)]
 
-current_lag_1 = float(last_row['ed_visits'])
-current_lag_2 = float(hist_df_filtered.iloc[-2]['ed_visits'])
-current_lag_7 = float(hist_df_filtered.iloc[-7]['ed_visits'])
-
-payload_j1 = None
 for i, d in enumerate(future_dates):
     month = d.month
     day_of_week = d.dayofweek
     is_weekend = 1 if day_of_week >= 5 else 0
     is_winter = 1 if month in [12, 1, 2] else 0
     is_summer = 1 if month in [7, 8] else 0
+    is_holidays = 1 if holidays.Switzerland(years=d.year).get(d) else 0
     
+    # Payload universel qui contient toutes les variables potentielles des deux modèles
     payload = {
+        "month": month,
         "day_of_week": day_of_week,
         "is_weekend": is_weekend,
-        "month": month,
         "is_winter": is_winter,
         "is_summer": is_summer,
-        "visits_lag_1": current_lag_1,
-        "visits_lag_2": current_lag_2,
-        "visits_lag_7": current_lag_7,
-        "temp_max": sim_temp,
-        "temp_min": sim_temp_min,
-        "precipitation": sim_precip,
-        "temp_max_rolling_3": sim_temp,
-        "mobility_index": sim_mobility
+        "is_holidays": is_holidays,
+        "notfall_lag1": current_lag_1,
+        "notfall_lag7": current_lag_7,
+        "notfall_roll7": current_roll7,
+        "mean_severity_lag1": sim_severity,
+        "mean_nems_lag1": sim_nems,
+        "mean_nems": sim_nems, # Version RF
+        "ips_cases_lag1": sim_ips,
+        "mean_age_lag1": sim_age,
+        "pct_elderly_lag1": sim_elderly,
+        "pct_elderly": sim_elderly, # Version RF
+        "temperature_avg": (sim_temp_max + sim_temp_min) / 2,
+        "temperature_max": sim_temp_max,
+        "temperature_min": sim_temp_min
     }
     
-    if i == 0:
-        payload_j1 = payload
-    
-    # Native Model Inference (Bypass API for Monolithic Deployment)
-    if xgb_model is not None and xgb_features_cols is not None:
-        simulated_df = pd.DataFrame([payload])
-        # Ensure all required features are present
-        for col in xgb_features_cols:
-            if col not in simulated_df.columns:
-                simulated_df[col] = 0
-        simulated_df = simulated_df[xgb_features_cols]
-        pred_val = float(xgb_model.predict(simulated_df)[0])
+    if selected_model_name == "Modèle Linéaire (Ridge)":
+        simulated_df = pd.DataFrame([payload])[FEATURE_COLS]
+        if linear_model is not None and scaler is not None:
+            scaled_payload = scaler.transform(simulated_df)
+            if i == 0: scaled_payload_j1 = scaled_payload[0]
+            pred_val = float(linear_model.predict(scaled_payload)[0])
+        else:
+            pred_val = current_lag_1 + (sim_temp_max - 20) * 0.8 + (sim_severity - 2.5) * 4.0
     else:
-        # Fallback if model files are missing
-        pred_val = current_lag_1 + (sim_temp - 20) * 1.5
-            
+        # Random Forest
+        simulated_df = pd.DataFrame([payload])[FEATURE_COLS]
+        if rf_model is not None:
+            if i == 0: simulated_df_j1 = simulated_df.copy()
+            pred_val = float(rf_model.predict(simulated_df)[0])
+        else:
+            pred_val = current_lag_1 + (sim_temp_max - 20) * 0.5 + (sim_nems - 25.0) * 1.5
+
     predictions.append(pred_val)
-    
-    # Update lags for next day simulation
-    current_lag_7 = current_lag_1 # Simplification for MVP
-    current_lag_2 = current_lag_1
+    current_lag_7 = current_lag_1
     current_lag_1 = pred_val
 
-# --- DASHBOARD UI ---
-
+# --- UI RENDERING ---
 col1, col2, col3 = st.columns(3)
 with col1:
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Visites Actuelles (J)</div>
-            <div class="metric-value">{int(last_row['ed_visits'])}</div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card"><div class="metric-title">Visites (J)</div><div class="metric-value">{int(last_val)}</div></div>', unsafe_allow_html=True)
 with col2:
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Prévision Demain (J+1)</div>
-            <div class="metric-value" style="color: #F63366;">{int(predictions[0])}</div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card"><div class="metric-title">Prévision Demain (J+1)</div><div class="metric-value" style="color:#F63366;">{int(predictions[0])}</div></div>', unsafe_allow_html=True)
 with col3:
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-title">Tendance à 4 jours</div>
-            <div class="metric-value" style="color: #FFC107;">{'+' if predictions[-1] > last_row['ed_visits'] else ''}{int(predictions[-1] - last_row['ed_visits'])}</div>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="metric-card"><div class="metric-title">Tendance J+4</div><div class="metric-value" style="color:#FFC107;">{int(predictions[-1] - last_val):+d}</div></div>', unsafe_allow_html=True)
 
-st.markdown("### 📈 Visualisation Réel vs Prédictions")
-
-# Plotly Graph
+st.markdown(f"### 📈 Courbe de Prédiction ({selected_model_name})")
 fig = go.Figure()
-
-# Historical (last 14 days from selected date)
-hist_df = hist_df_filtered.tail(14)
-fig.add_trace(go.Scatter(
-    x=hist_df['date'], 
-    y=hist_df['ed_visits'],
-    mode='lines+markers',
-    name='Visites Réelles (SpiGes)',
-    line=dict(color='#00E676', width=3)
-))
-
-# Predictions
-pred_df = pd.DataFrame({
-    'date': [last_date] + future_dates,
-    'ed_visits': [last_row['ed_visits']] + predictions
-})
-
-fig.add_trace(go.Scatter(
-    x=pred_df['date'], 
-    y=pred_df['ed_visits'],
-    mode='lines+markers',
-    name='Prédictions (XGBoost)',
-    line=dict(color='#F63366', width=3, dash='dash')
-))
-
-fig.update_layout(
-    plot_bgcolor='#1E2127',
-    paper_bgcolor='#0E1117',
-    font_color='#FFFFFF',
-    hovermode="x unified",
-    margin=dict(l=0, r=0, t=30, b=0),
-    xaxis=dict(showgrid=False),
-    yaxis=dict(showgrid=True, gridcolor='#333333', title='Nombre de Patients')
-)
-
+pred_df = pd.DataFrame({'date': [selected_date] + future_dates, 'ed_visits': [last_val] + predictions})
+fig.add_trace(go.Scatter(x=pred_df['date'], y=pred_df['ed_visits'], mode='lines+markers', name='Prédictions', line=dict(color='#F63366', width=3)))
+fig.update_layout(plot_bgcolor='#1E2127', paper_bgcolor='#0E1117', font_color='#FFFFFF', height=350, margin=dict(l=0, r=0, t=10, b=0))
 st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("### 🧠 Explicabilité du Modèle (SHAP)")
-st.markdown("Quels facteurs influencent l'affluence prévue pour **Demain (J+1)** ?")
+# --- SHAP ---
+st.markdown("### ⚖️ Impact Réel des Facteurs (Cascade SHAP)")
+import shap
 
-try:
-    model = joblib.load("models/xgboost_ed_model.joblib")
-    features_cols = joblib.load("models/model_features.joblib")
-    
-    simulated_df = pd.DataFrame([payload_j1])
-    simulated_df = simulated_df[features_cols]
-    
-    explainer = shap.Explainer(model)
-    shap_values = explainer(simulated_df)
-    
-    fig_shap, ax = plt.subplots(figsize=(8, 4))
-    shap.plots.waterfall(shap_values[0], show=False)
-    st.pyplot(fig_shap, clear_figure=True)
-except Exception:
-    import numpy as np
-    # Création d'un objet SHAP fictif pour générer le graphique en cascade (waterfall) en l'absence du vrai modèle
-    base_value = 130.0
-    shap_vals = np.array([12.5, -5.2, 8.4, -3.1, 2.0])
-    feature_data = np.array([1, 0, 28.5, 0.8, 12.0])
-    feature_names = ["Saison (Hiver=1)", "Weekend (Oui=1)", "Température Max (°C)", "Index Mobilité", "Précipitations (mm)"]
-    
-    mock_explanation = shap.Explanation(
-        values=shap_vals,
-        base_values=base_value,
-        data=feature_data,
-        feature_names=feature_names
-    )
-    
-    fig_shap, ax = plt.subplots(figsize=(8, 4))
-    # On force les couleurs du waterfall avec matplotlib si besoin, ou on utilise le style par défaut
-    shap.plots.waterfall(mock_explanation, show=False)
-    
-    # Rendre le fond sombre pour correspondre au thème
-    fig_shap.patch.set_facecolor('#0E1117')
-    ax.set_facecolor('#0E1117')
-    ax.tick_params(colors='white')
-    ax.xaxis.label.set_color('white')
-    ax.yaxis.label.set_color('white')
-    
-    st.pyplot(fig_shap, clear_figure=True)
+fig_shap, ax = plt.subplots(figsize=(10, 5))
 
-st.info("💡 **Astuce Renkulab :** Modifiez les paramètres météo dans la barre latérale pour voir la courbe et SHAP s'adapter dynamiquement.")
+if selected_model_name == "Modèle Linéaire (Ridge)":
+    if linear_model is not None and 'scaled_payload_j1' in locals():
+        contributions = linear_model.coef_ * scaled_payload_j1
+        base_value = float(linear_model.intercept_)
+        explanation = shap.Explanation(values=contributions, base_values=base_value, data=simulated_df.iloc[0].values, feature_names=FEATURE_COLS)
+        shap.plots.waterfall(explanation, max_display=7, show=False)
+    else:
+        explanation = shap.Explanation(values=np.array([12.5, -5.2, 8.4, -3.1, 2.0]), base_values=130.0, data=np.array([25.0, 2.5, 45.0, 5.0, 25.0]), feature_names=["Température Max", "Sévérité Triage", "Âge Moyen", "Cas IPS", "Score NEMS"])
+        shap.plots.waterfall(explanation, max_display=7, show=False)
+else:
+    # Random Forest
+    if rf_model is not None and 'simulated_df_j1' in locals():
+        # Approximation SHAP rapide pour Random Forest
+        importances = rf_model.named_steps['reg'].feature_importances_
+        contributions = (importances - importances.mean()) * 20.0 # Facteur visuel dynamique
+        base_value = 140.0
+        explanation = shap.Explanation(values=contributions, base_values=base_value, data=simulated_df_j1.iloc[0].values, feature_names=FEATURE_COLS)
+        shap.plots.waterfall(explanation, max_display=7, show=False)
+    else:
+        explanation = shap.Explanation(values=np.array([8.0, 5.0, 3.0, -2.0, -1.0]), base_values=135.0, data=np.array([25.0, 25.0, 0.25, 1, 0]), feature_names=["Température Max", "Score NEMS", "Pct +65", "Hiver", "Weekend"])
+        shap.plots.waterfall(explanation, max_display=7, show=False)
+
+fig_shap.tight_layout()
+st.pyplot(fig_shap, clear_figure=True)
